@@ -361,17 +361,8 @@ export class TerminalSessionManager {
 
       requestAnimationFrame(() => {
         if (gen !== this.attachGeneration) return;
-        this.fitAddon.fit();
+        this.fit();
         this.terminal.focus();
-
-        const dims = this.fitAddon.proposeDimensions();
-        if (!dims || dims.cols <= 0 || dims.rows <= 0) return;
-
-        window.electronAPI.ptyResize({
-          id: this.id,
-          cols: dims.cols,
-          rows: dims.rows,
-        });
       });
     }
   }
@@ -534,7 +525,20 @@ export class TerminalSessionManager {
 
   private fit() {
     try {
+      // Preserve scroll position — fitAddon.fit() can reset the viewport to top
+      const viewport = this.terminal.element?.querySelector(
+        '.xterm-viewport',
+      ) as HTMLElement | null;
+      const wasAtBottom = this.isAtBottom();
+      const prevScrollTop = viewport?.scrollTop ?? 0;
+
       this.fitAddon.fit();
+
+      // Restore scroll position if user was scrolled up
+      if (viewport && !wasAtBottom) {
+        viewport.scrollTop = prevScrollTop;
+      }
+
       const dims = this.fitAddon.proposeDimensions();
       if (dims && dims.cols > 0 && dims.rows > 0) {
         // Skip redundant PTY resizes to avoid SIGWINCH prompt redraw
