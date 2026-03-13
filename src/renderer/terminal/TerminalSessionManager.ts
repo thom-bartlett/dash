@@ -43,6 +43,8 @@ export class TerminalSessionManager {
   private lastPtyCols = 0;
   private lastPtyRows = 0;
   private writeScrollRafPending = false;
+  private savedScrollAtBottom = true;
+  private savedViewportY = 0;
   readonly shellOnly: boolean;
   private themeId: string;
   constructor(opts: {
@@ -157,12 +159,18 @@ export class TerminalSessionManager {
     // Track scroll position to notify UI when user scrolls away from bottom
     this.terminal.onScroll(() => this.emitScrollState());
     // Batch write-driven scroll checks to once per frame to avoid
-    // excessive React re-renders during heavy terminal output
+    // excessive React re-renders during heavy terminal output.
+    // Also pin viewport to bottom when the user was already there —
+    // Ink redraws move the cursor up via escape sequences which causes
+    // xterm to scroll the viewport to follow the cursor.
     this.terminal.onWriteParsed(() => {
       if (!this.writeScrollRafPending) {
         this.writeScrollRafPending = true;
         requestAnimationFrame(() => {
           this.writeScrollRafPending = false;
+          if (this.lastEmittedAtBottom && !this.isAtBottom()) {
+            this.terminal.scrollToBottom();
+          }
           this.emitScrollState();
         });
       }
@@ -207,10 +215,16 @@ export class TerminalSessionManager {
       // After yielding, check if a newer attach() has started (React remount)
       if (gen !== this.attachGeneration) return;
     } else {
-      // Re-attach: move the xterm element back into the visible container
+      // Re-attach: move the xterm element back into the visible container.
+      // appendChild resets scrollTop — save and restore it around the move.
       const xtermEl = this.terminal.element;
       if (xtermEl && xtermEl.parentElement !== container) {
+        const viewport = xtermEl.querySelector('.xterm-viewport') as HTMLElement | null;
+        const savedScrollTop = viewport?.scrollTop ?? 0;
         container.appendChild(xtermEl);
+        if (viewport) {
+          viewport.scrollTop = savedScrollTop;
+        }
       }
     }
 
@@ -361,22 +375,32 @@ export class TerminalSessionManager {
 
       requestAnimationFrame(() => {
         if (gen !== this.attachGeneration) return;
-        this.fitAddon.fit();
+        this.fit();
+        // Restore scroll from detach-time state (reliable, unlike post-fit buffer state)
+        if (this.savedScrollAtBottom) {
+          this.terminal.scrollToBottom();
+        } else {
+          const buf = this.terminal.buffer.active;
+          this.terminal.scrollToLine(Math.min(this.savedViewportY, buf.baseY));
+        }
+        // Force DOM viewport to match xterm internal state — the WebGL/Canvas
+        // renderer may not sync scrollTop after a DOM re-parent
+        const vp = this.terminal.element?.querySelector('.xterm-viewport') as HTMLElement | null;
+        if (vp) {
+          if (this.savedScrollAtBottom) {
+            vp.scrollTop = vp.scrollHeight;
+          }
+        }
         this.terminal.focus();
-
-        const dims = this.fitAddon.proposeDimensions();
-        if (!dims || dims.cols <= 0 || dims.rows <= 0) return;
-
-        window.electronAPI.ptyResize({
-          id: this.id,
-          cols: dims.cols,
-          rows: dims.rows,
-        });
       });
     }
   }
 
   detach() {
+    // Capture scroll position while terminal is still visible and state is reliable
+    this.savedScrollAtBottom = this.isAtBottom();
+    this.savedViewportY = this.terminal.buffer.active.viewportY;
+
     // Save snapshot before detaching
     this.saveSnapshot();
 
@@ -534,7 +558,21 @@ export class TerminalSessionManager {
 
   private fit() {
     try {
+      const buf = this.terminal.buffer.active;
+      const wasAtBottom = buf.baseY - buf.viewportY <= 10;
+      const prevViewportY = buf.viewportY;
+
       this.fitAddon.fit();
+
+      // fit() can reset the viewport — restore scroll position afterward.
+      // When the terminal was off-screen (re-attach), baseY/viewportY may
+      // both be 0 before fit, so we must handle both directions.
+      if (wasAtBottom) {
+        this.terminal.scrollToBottom();
+      } else {
+        this.terminal.scrollToLine(Math.min(prevViewportY, buf.baseY));
+      }
+
       const dims = this.fitAddon.proposeDimensions();
       if (dims && dims.cols > 0 && dims.rows > 0) {
         // Skip redundant PTY resizes to avoid SIGWINCH prompt redraw
