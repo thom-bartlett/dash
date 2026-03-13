@@ -210,7 +210,17 @@ export class TerminalSessionManager {
       // Re-attach: move the xterm element back into the visible container
       const xtermEl = this.terminal.element;
       if (xtermEl && xtermEl.parentElement !== container) {
+        // Save scroll position before moving — the browser resets scrollTop
+        // when an element is re-appended to a different parent
+        const viewport = xtermEl.querySelector('.xterm-viewport') as HTMLElement | null;
+        const savedScrollTop = viewport?.scrollTop ?? 0;
+
         container.appendChild(xtermEl);
+
+        // Restore scroll position immediately after re-append
+        if (viewport) {
+          viewport.scrollTop = savedScrollTop;
+        }
       }
     }
 
@@ -526,17 +536,17 @@ export class TerminalSessionManager {
   private fit() {
     try {
       // Preserve scroll position — fitAddon.fit() can reset the viewport to top
-      const viewport = this.terminal.element?.querySelector(
-        '.xterm-viewport',
-      ) as HTMLElement | null;
       const wasAtBottom = this.isAtBottom();
-      const prevScrollTop = viewport?.scrollTop ?? 0;
+      const prevViewportY = this.terminal.buffer.active.viewportY;
 
       this.fitAddon.fit();
 
-      // Restore scroll position if user was scrolled up
-      if (viewport && !wasAtBottom) {
-        viewport.scrollTop = prevScrollTop;
+      // Restore scroll position if user was scrolled up.
+      // Use xterm's logical viewportY rather than raw scrollTop because
+      // fitAddon.fit() may reflow the buffer (changing baseY), which makes
+      // the old pixel scrollTop invalid.
+      if (!wasAtBottom) {
+        this.terminal.scrollToLine(prevViewportY);
       }
 
       const dims = this.fitAddon.proposeDimensions();
